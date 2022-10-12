@@ -392,6 +392,14 @@ CODE
                         - likewise io.MousePos and GetMousePos() will use OS coordinates.
                           If you query mouse positions to interact with non-imgui coordinates you will need to offset them, e.g. subtract GetWindowViewport()->Pos.
 
+ - 2022/09/26 (1.89) - renamed and merged keyboard modifiers key enums and flags into a same set. Kept inline redirection enums (will obsolete).
+                         - ImGuiKey_ModCtrl  and ImGuiModFlags_Ctrl  -> ImGuiMod_Ctrl
+                         - ImGuiKey_ModShift and ImGuiModFlags_Shift -> ImGuiMod_Shift
+                         - ImGuiKey_ModAlt   and ImGuiModFlags_Alt   -> ImGuiMod_Alt
+                         - ImGuiKey_ModSuper and ImGuiModFlags_Super -> ImGuiMod_Super
+                       the ImGuiKey_ModXXX were introduced in 1.87 and mostly used by backends.
+                       the ImGuiModFlags_XXX have been exposed in imgui.h but not really used by any public api only by third-party extensions.
+                       exceptionally commenting out the older ImGuiKeyModFlags_XXX names ahead of obsolescence schedule to reduce confusion and because they were not meant to be used anyway.
  - 2022/09/12 (1.89) - removed the bizarre legacy default argument for 'TreePush(const void* ptr = NULL)', always pass a pointer value explicitly, NULL is ok.
  - 2022/09/05 (1.89) - commented out redirecting functions/enums names that were marked obsolete in 1.77 and 1.78 (June 2020):
                          - DragScalar(), DragScalarN(), DragFloat(), DragFloat2(), DragFloat3(), DragFloat4(): For old signatures ending with (..., const char* format, float power = 1.0f) -> use (..., format ImGuiSliderFlags_Logarithmic) if power != 1.0f.
@@ -439,7 +447,7 @@ CODE
                         - IsKeyPressed(MY_NATIVE_KEY_XXX)              -> use IsKeyPressed(ImGuiKey_XXX)
                         - IsKeyPressed(GetKeyIndex(ImGuiKey_XXX))      -> use IsKeyPressed(ImGuiKey_XXX)
                         - Backend writing to io.KeyMap[],io.KeysDown[] -> backend should call io.AddKeyEvent() (+ call io.SetKeyEventNativeData() if you want legacy user code to stil function with legacy key codes).
-                        - Backend writing to io.KeyCtrl, io.KeyShift.. -> backend should call io.AddKeyEvent() with ImGuiKey_ModXXX values. *IF YOU PULLED CODE BETWEEN 2021/01/10 and 2021/01/27: We used to have a io.AddKeyModsEvent() function which was now replaced by io.AddKeyEvent() with ImGuiKey_ModXXX values.*
+                        - Backend writing to io.KeyCtrl, io.KeyShift.. -> backend should call io.AddKeyEvent() with ImGuiMod_XXX values. *IF YOU PULLED CODE BETWEEN 2021/01/10 and 2021/01/27: We used to have a io.AddKeyModsEvent() function which was now replaced by io.AddKeyEvent() with ImGuiMod_XXX values.*
                      - one case won't work with backward compatibility: if your custom backend used ImGuiKey as mock native indices (e.g. "io.KeyMap[ImGuiKey_A] = ImGuiKey_A") because those values are now larger than the legacy KeyDown[] array. Will assert.
                      - inputs: added ImGuiKey_ModCtrl/ImGuiKey_ModShift/ImGuiKey_ModAlt/ImGuiKey_ModSuper values to submit keyboard modifiers using io.AddKeyEvent(), instead of writing directly to io.KeyCtrl, io.KeyShift, io.KeyAlt, io.KeySuper.
  - 2022/01/05 (1.87) - inputs: renamed ImGuiKey_KeyPadEnter to ImGuiKey_KeypadEnter to align with new symbols. Kept redirection enum.
@@ -953,7 +961,7 @@ static const float NAV_WINDOWING_LIST_APPEAR_DELAY          = 0.15f;    // Time 
 // Window resizing from edges (when io.ConfigWindowsResizeFromEdges = true and ImGuiBackendFlags_HasMouseCursors is set in io.BackendFlags by backend)
 static const float WINDOWS_HOVER_PADDING                    = 4.0f;     // Extend outside window for hovering/resizing (maxxed with TouchPadding) and inside windows for borders. Affect FindHoveredWindow().
 static const float WINDOWS_RESIZE_FROM_EDGES_FEEDBACK_TIMER = 0.04f;    // Reduce visual noise by only highlighting the border after a certain time.
-static const float WINDOWS_MOUSE_WHEEL_SCROLL_LOCK_TIMER    = 2.00f;    // Lock scrolled window (so it doesn't pick child windows that are scrolling through) for a certain time, unless mouse moved.
+static const float WINDOWS_MOUSE_WHEEL_SCROLL_LOCK_TIMER    = 0.80f;    // Lock scrolled window (so it doesn't pick child windows that are scrolling through) for a certain time, unless mouse moved.
 
 // Docking
 static const float DOCKING_TRANSPARENT_PAYLOAD_ALPHA        = 0.50f;    // For use with io.ConfigDockingTransparentPayload. Apply to Viewport _or_ WindowBg in host viewport.
@@ -1310,11 +1318,13 @@ void ImGuiIO::AddInputCharactersUTF8(const char* utf8_chars)
     }
 }
 
+// FIXME: Perhaps we could clear queued events as well?
 void ImGuiIO::ClearInputCharacters()
 {
     InputQueueCharacters.resize(0);
 }
 
+// FIXME: Perhaps we could clear queued events as well?
 void ImGuiIO::ClearInputKeys()
 {
 #ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
@@ -1327,7 +1337,24 @@ void ImGuiIO::ClearInputKeys()
         KeysData[n].DownDurationPrev = -1.0f;
     }
     KeyCtrl = KeyShift = KeyAlt = KeySuper = false;
-    KeyMods = ImGuiModFlags_None;
+    KeyMods = ImGuiMod_None;
+}
+
+static ImGuiInputEvent* FindLatestInputEvent(ImGuiInputEventType type, int arg = -1)
+{
+    ImGuiContext& g = *GImGui;
+    for (int n = g.InputEventsQueue.Size - 1; n >= 0; n--)
+    {
+        ImGuiInputEvent* e = &g.InputEventsQueue[n];
+        if (e->Type != type)
+            continue;
+        if (type == ImGuiInputEventType_Key && e->Key.Key != arg)
+            continue;
+        if (type == ImGuiInputEventType_MouseButton && e->MouseButton.Button != arg)
+            continue;
+        return e;
+    }
+    return NULL;
 }
 
 // Queue a new key down/up event.
@@ -1341,7 +1368,7 @@ void ImGuiIO::AddKeyAnalogEvent(ImGuiKey key, bool down, float analog_value)
         return;
     ImGuiContext& g = *GImGui;
     IM_ASSERT(&g.IO == this && "Can only add events to current context.");
-    IM_ASSERT(ImGui::IsNamedKey(key)); // Backend needs to pass a valid ImGuiKey_ constant. 0..511 values are legacy native key codes which are not accepted by this API.
+    IM_ASSERT(ImGui::IsNamedKeyOrModKey(key)); // Backend needs to pass a valid ImGuiKey_ constant. 0..511 values are legacy native key codes which are not accepted by this API.
     IM_ASSERT(!ImGui::IsAliasKey(key)); // Backend cannot submit ImGuiKey_MouseXXX values they are automatically inferred from AddMouseXXX() events.
 
     // Verify that backend isn't mixing up using new io.AddKeyEvent() api and old io.KeysDown[] + io.KeyMap[] data.
@@ -1355,17 +1382,13 @@ void ImGuiIO::AddKeyAnalogEvent(ImGuiKey key, bool down, float analog_value)
     if (ImGui::IsGamepadKey(key))
         BackendUsingLegacyNavInputArray = false;
 
-    // Partial filter of duplicates (not strictly needed, but makes data neater in particular for key mods and gamepad values which are most commonly spmamed)
-    ImGuiKeyData* key_data = ImGui::GetKeyData(key);
-    if (key_data->Down == down && key_data->AnalogValue == analog_value)
-    {
-        bool found = false;
-        for (int n = g.InputEventsQueue.Size - 1; n >= 0 && !found; n--)
-            if (g.InputEventsQueue[n].Type == ImGuiInputEventType_Key && g.InputEventsQueue[n].Key.Key == key)
-                found = true;
-        if (!found)
-            return;
-    }
+    // Filter duplicate (in particular: key mods and gamepad analog values are commonly spammed)
+    const ImGuiInputEvent* latest_event = FindLatestInputEvent(ImGuiInputEventType_Key, (int)key);
+    const ImGuiKeyData* key_data = ImGui::GetKeyData(key);
+    const bool latest_key_down = latest_event ? latest_event->Key.Down : key_data->Down;
+    const float latest_key_analog = latest_event ? latest_event->Key.AnalogValue : key_data->AnalogValue;
+    if (latest_key_down == down && latest_key_analog == analog_value)
+        return;
 
     // Add event
     ImGuiInputEvent e;
@@ -1392,14 +1415,14 @@ void ImGuiIO::SetKeyEventNativeData(ImGuiKey key, int native_keycode, int native
     if (key == ImGuiKey_None)
         return;
     IM_ASSERT(ImGui::IsNamedKey(key)); // >= 512
-    IM_ASSERT(native_legacy_index == -1 || ImGui::IsLegacyKey(native_legacy_index)); // >= 0 && <= 511
+    IM_ASSERT(native_legacy_index == -1 || ImGui::IsLegacyKey((ImGuiKey)native_legacy_index)); // >= 0 && <= 511
     IM_UNUSED(native_keycode);  // Yet unused
     IM_UNUSED(native_scancode); // Yet unused
 
     // Build native->imgui map so old user code can still call key functions with native 0..511 values.
 #ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
     const int legacy_key = (native_legacy_index != -1) ? native_legacy_index : native_keycode;
-    if (!ImGui::IsLegacyKey(legacy_key))
+    if (!ImGui::IsLegacyKey((ImGuiKey)legacy_key))
         return;
     KeyMap[legacy_key] = key;
     KeyMap[key] = legacy_key;
@@ -1423,11 +1446,20 @@ void ImGuiIO::AddMousePosEvent(float x, float y)
     if (!AppAcceptingEvents)
         return;
 
+    // Apply same flooring as UpdateMouseInputs()
+    ImVec2 pos((x > -FLT_MAX) ? ImFloorSigned(x) : x, (y > -FLT_MAX) ? ImFloorSigned(y) : y);
+
+    // Filter duplicate
+    const ImGuiInputEvent* latest_event = FindLatestInputEvent(ImGuiInputEventType_MousePos);
+    const ImVec2 latest_pos = latest_event ? ImVec2(latest_event->MousePos.PosX, latest_event->MousePos.PosY) : g.IO.MousePos;
+    if (latest_pos.x == pos.x && latest_pos.y == pos.y)
+        return;
+
     ImGuiInputEvent e;
     e.Type = ImGuiInputEventType_MousePos;
     e.Source = ImGuiInputSource_Mouse;
-    e.MousePos.PosX = x;
-    e.MousePos.PosY = y;
+    e.MousePos.PosX = pos.x;
+    e.MousePos.PosY = pos.y;
     g.InputEventsQueue.push_back(e);
 }
 
@@ -1437,6 +1469,12 @@ void ImGuiIO::AddMouseButtonEvent(int mouse_button, bool down)
     IM_ASSERT(&g.IO == this && "Can only add events to current context.");
     IM_ASSERT(mouse_button >= 0 && mouse_button < ImGuiMouseButton_COUNT);
     if (!AppAcceptingEvents)
+        return;
+
+    // Filter duplicate
+    const ImGuiInputEvent* latest_event = FindLatestInputEvent(ImGuiInputEventType_MouseButton, (int)mouse_button);
+    const bool latest_button_down = latest_event ? latest_event->MouseButton.Down : g.IO.MouseDown[mouse_button];
+    if (latest_button_down == down)
         return;
 
     ImGuiInputEvent e;
@@ -1452,7 +1490,9 @@ void ImGuiIO::AddMouseWheelEvent(float wheel_x, float wheel_y)
 {
     ImGuiContext& g = *GImGui;
     IM_ASSERT(&g.IO == this && "Can only add events to current context.");
-    if ((wheel_x == 0.0f && wheel_y == 0.0f) || !AppAcceptingEvents)
+
+    // Filter duplicate (unlike most events, wheel values are relative and easy to filter)
+    if (!AppAcceptingEvents || (wheel_x == 0.0f && wheel_y == 0.0f))
         return;
 
     ImGuiInputEvent e;
@@ -1468,6 +1508,14 @@ void ImGuiIO::AddMouseViewportEvent(ImGuiID viewport_id)
     ImGuiContext& g = *GImGui;
     IM_ASSERT(&g.IO == this && "Can only add events to current context.");
     IM_ASSERT(g.IO.BackendFlags & ImGuiBackendFlags_HasMouseHoveredViewport);
+    if (!AppAcceptingEvents)
+        return;
+
+    // Filter duplicate
+    const ImGuiInputEvent* latest_event = FindLatestInputEvent(ImGuiInputEventType_MouseViewport);
+    const ImGuiID latest_viewport_id = latest_event ? latest_event->MouseViewport.HoveredViewportID : g.IO.MouseHoveredViewport;
+    if (latest_viewport_id == viewport_id)
+        return;
 
     ImGuiInputEvent e;
     e.Type = ImGuiInputEventType_MouseViewport;
@@ -1480,6 +1528,12 @@ void ImGuiIO::AddFocusEvent(bool focused)
 {
     ImGuiContext& g = *GImGui;
     IM_ASSERT(&g.IO == this && "Can only add events to current context.");
+
+    // Filter duplicate
+    const ImGuiInputEvent* latest_event = FindLatestInputEvent(ImGuiInputEventType_Focus);
+    const bool latest_focused = latest_event ? latest_event->AppFocused.Focused : !g.IO.AppFocusLost;
+    if (latest_focused == focused)
+        return;
 
     ImGuiInputEvent e;
     e.Type = ImGuiInputEventType_Focus;
@@ -3646,6 +3700,7 @@ bool ImGui::IsItemHovered(ImGuiHoveredFlags flags)
             return false;
         IM_ASSERT((flags & (ImGuiHoveredFlags_AnyWindow | ImGuiHoveredFlags_RootWindow | ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_NoPopupHierarchy | ImGuiHoveredFlags_DockHierarchy)) == 0);   // Flags not supported by this function
 
+        // Done with rectangle culling so we can perform heavier checks now
         // Test if we are hovering the right window (our window could be behind another window)
         // [2021/03/02] Reworked / reverted the revert, finally. Note we want e.g. BeginGroup/ItemAdd/EndGroup to work as well. (#3851)
         // [2017/10/16] Reverted commit 344d48be3 and testing RootWindow instead. I believe it is correct to NOT test for RootWindow but this leaves us unable
@@ -3712,7 +3767,10 @@ bool ImGui::ItemHoverable(const ImRect& bb, ImGuiID id)
         return false;
     if (!IsMouseHoveringRect(bb.Min, bb.Max))
         return false;
-    if (!IsWindowContentHoverable(window, ImGuiHoveredFlags_None))
+
+    // Done with rectangle culling so we can perform heavier checks now.
+    ImGuiItemFlags item_flags = (g.LastItemData.ID == id ? g.LastItemData.InFlags : g.CurrentItemFlags);
+    if (!(item_flags & ImGuiItemFlags_NoWindowHoverableCheck) && !IsWindowContentHoverable(window, ImGuiHoveredFlags_None))
     {
         g.HoveredIdDisabled = true;
         return false;
@@ -3724,7 +3782,6 @@ bool ImGui::ItemHoverable(const ImRect& bb, ImGuiID id)
         SetHoveredID(id);
 
     // When disabled we'll return false but still set HoveredId
-    ImGuiItemFlags item_flags = (g.LastItemData.ID == id ? g.LastItemData.InFlags : g.CurrentItemFlags);
     if (item_flags & ImGuiItemFlags_Disabled)
     {
         // Release active id if turning disabled
@@ -4203,6 +4260,18 @@ static void UpdateAliasKey(ImGuiKey key, bool v, float analog_value)
     key_data->AnalogValue = analog_value;
 }
 
+// [Internal] Do not use directly (should read io.KeyMods instead)
+static ImGuiKeyChord GetMergedModsFromBools()
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiKeyChord key_chord = 0;
+    if (g.IO.KeyCtrl)  { key_chord |= ImGuiMod_Ctrl; }
+    if (g.IO.KeyShift) { key_chord |= ImGuiMod_Shift; }
+    if (g.IO.KeyAlt)   { key_chord |= ImGuiMod_Alt; }
+    if (g.IO.KeySuper) { key_chord |= ImGuiMod_Super; }
+    return key_chord;
+}
+
 static void ImGui::UpdateKeyboardInputs()
 {
     ImGuiContext& g = *GImGui;
@@ -4214,7 +4283,7 @@ static void ImGui::UpdateKeyboardInputs()
     {
         // Backend used new io.AddKeyEvent() API: Good! Verify that old arrays are never written to externally.
         for (int n = 0; n < ImGuiKey_LegacyNativeKey_END; n++)
-            IM_ASSERT((io.KeysDown[n] == false || IsKeyDown(n)) && "Backend needs to either only use io.AddKeyEvent(), either only fill legacy io.KeysDown[] + io.KeyMap[]. Not both!");
+            IM_ASSERT((io.KeysDown[n] == false || IsKeyDown((ImGuiKey)n)) && "Backend needs to either only use io.AddKeyEvent(), either only fill legacy io.KeysDown[] + io.KeyMap[]. Not both!");
     }
     else
     {
@@ -4243,10 +4312,10 @@ static void ImGui::UpdateKeyboardInputs()
             }
         if (io.BackendUsingLegacyKeyArrays == 1)
         {
-            io.KeysData[ImGuiKey_ModCtrl].Down = io.KeyCtrl;
-            io.KeysData[ImGuiKey_ModShift].Down = io.KeyShift;
-            io.KeysData[ImGuiKey_ModAlt].Down = io.KeyAlt;
-            io.KeysData[ImGuiKey_ModSuper].Down = io.KeySuper;
+            GetKeyData(ImGuiMod_Ctrl)->Down = io.KeyCtrl;
+            GetKeyData(ImGuiMod_Shift)->Down = io.KeyShift;
+            GetKeyData(ImGuiMod_Alt)->Down = io.KeyAlt;
+            GetKeyData(ImGuiMod_Super)->Down = io.KeySuper;
         }
     }
 
@@ -4277,7 +4346,7 @@ static void ImGui::UpdateKeyboardInputs()
 #endif
 
     // Synchronize io.KeyMods with individual modifiers io.KeyXXX bools, update aliases
-    io.KeyMods = GetMergedModFlags();
+    io.KeyMods = GetMergedModsFromBools();
     for (int n = 0; n < ImGuiMouseButton_COUNT; n++)
         UpdateAliasKey(MouseButtonToKey(n), io.MouseDown[n], io.MouseDown[n] ? 1.0f : 0.0f);
     UpdateAliasKey(ImGuiKey_MouseWheelX, io.MouseWheelH != 0.0f, io.MouseWheelH);
@@ -4364,14 +4433,15 @@ static void ImGui::UpdateMouseInputs()
     }
 }
 
-static void StartLockWheelingWindow(ImGuiWindow* window)
+static void LockWheelingWindow(ImGuiWindow* window)
 {
     ImGuiContext& g = *GImGui;
+    g.WheelingWindowReleaseTimer = window ? WINDOWS_MOUSE_WHEEL_SCROLL_LOCK_TIMER : 0.0f;
     if (g.WheelingWindow == window)
         return;
+    IMGUI_DEBUG_LOG_IO("LockWheelingWindow() \"%s\"\n", window ? window->Name : "NULL");
     g.WheelingWindow = window;
     g.WheelingWindowRefMousePos = g.IO.MousePos;
-    g.WheelingWindowTimer = WINDOWS_MOUSE_WHEEL_SCROLL_LOCK_TIMER;
 }
 
 void ImGui::UpdateMouseWheel()
@@ -4381,34 +4451,34 @@ void ImGui::UpdateMouseWheel()
     // Reset the locked window if we move the mouse or after the timer elapses
     if (g.WheelingWindow != NULL)
     {
-        g.WheelingWindowTimer -= g.IO.DeltaTime;
+        g.WheelingWindowReleaseTimer -= g.IO.DeltaTime;
         if (IsMousePosValid() && ImLengthSqr(g.IO.MousePos - g.WheelingWindowRefMousePos) > g.IO.MouseDragThreshold * g.IO.MouseDragThreshold)
-            g.WheelingWindowTimer = 0.0f;
-        if (g.WheelingWindowTimer <= 0.0f)
-        {
-            g.WheelingWindow = NULL;
-            g.WheelingWindowTimer = 0.0f;
-        }
+            g.WheelingWindowReleaseTimer = 0.0f;
+        if (g.WheelingWindowReleaseTimer <= 0.0f)
+            LockWheelingWindow(NULL);
     }
 
     const bool hovered_id_using_mouse_wheel = (g.HoveredIdPreviousFrame != 0 && g.HoveredIdPreviousFrameUsingMouseWheel);
     const bool active_id_using_mouse_wheel_x = g.ActiveIdUsingKeyInputMask.TestBit(ImGuiKey_MouseWheelX);
     const bool active_id_using_mouse_wheel_y = g.ActiveIdUsingKeyInputMask.TestBit(ImGuiKey_MouseWheelY);
 
-    float wheel_x = (!hovered_id_using_mouse_wheel && !active_id_using_mouse_wheel_x) ? g.IO.MouseWheelH : 0.0f;
-    float wheel_y = (!hovered_id_using_mouse_wheel && !active_id_using_mouse_wheel_y) ? g.IO.MouseWheel : 0;
-    if (wheel_x == 0.0f && wheel_y == 0.0f)
+    ImVec2 wheel;
+    wheel.x = (!hovered_id_using_mouse_wheel && !active_id_using_mouse_wheel_x) ? g.IO.MouseWheelH : 0.0f;
+    wheel.y = (!hovered_id_using_mouse_wheel && !active_id_using_mouse_wheel_y) ? g.IO.MouseWheel : 0;
+    if (wheel.x == 0.0f && wheel.y == 0.0f)
         return;
 
-    ImGuiWindow* window = g.WheelingWindow ? g.WheelingWindow : g.HoveredWindow;
-    if (!window || window->Collapsed)
+    //IMGUI_DEBUG_LOG("MouseWheel X:%.3f Y:%.3f\n", wheel_x, wheel_y);
+    ImGuiWindow* mouse_window = g.WheelingWindow ? g.WheelingWindow : g.HoveredWindow;
+    if (!mouse_window || mouse_window->Collapsed)
         return;
 
     // Zoom / Scale window
     // FIXME-OBSOLETE: This is an old feature, it still works but pretty much nobody is using it and may be best redesigned.
-    if (wheel_y != 0.0f && g.IO.KeyCtrl && g.IO.FontAllowUserScaling)
+    if (wheel.y != 0.0f && g.IO.KeyCtrl && g.IO.FontAllowUserScaling)
     {
-        StartLockWheelingWindow(window);
+        LockWheelingWindow(mouse_window);
+        ImGuiWindow* window = mouse_window;
         const float new_font_scale = ImClamp(window->FontWindowScale + g.IO.MouseWheel * 0.10f, 0.50f, 2.50f);
         const float scale = new_font_scale / window->FontWindowScale;
         window->FontWindowScale = new_font_scale;
@@ -4421,46 +4491,50 @@ void ImGui::UpdateMouseWheel()
         }
         return;
     }
-
-    // Mouse wheel scrolling
-    // If a child window has the ImGuiWindowFlags_NoScrollWithMouse flag, we give a chance to scroll its parent
     if (g.IO.KeyCtrl)
         return;
 
+    // Mouse wheel scrolling
     // As a standard behavior holding SHIFT while using Vertical Mouse Wheel triggers Horizontal scroll instead
     // (we avoid doing it on OSX as it the OS input layer handles this already)
     const bool swap_axis = g.IO.KeyShift && !g.IO.ConfigMacOSXBehaviors;
     if (swap_axis)
     {
-        wheel_x = wheel_y;
-        wheel_y = 0.0f;
+        wheel.x = wheel.y;
+        wheel.y = 0.0f;
     }
 
     // Vertical Mouse Wheel scrolling
-    if (wheel_y != 0.0f)
+    // Bubble up into parent window if:
+    // - a child window doesn't allow any scrolling.
+    // - a child window doesn't need scrolling because it is already at the edge for the direction we are going in.
+    // - a child window has the ImGuiWindowFlags_NoScrollWithMouse flag.
+    if (wheel.y != 0.0f)
     {
-        StartLockWheelingWindow(window);
+        ImGuiWindow* window = mouse_window;
         while ((window->Flags & ImGuiWindowFlags_ChildWindow) && ((window->ScrollMax.y == 0.0f) || ((window->Flags & ImGuiWindowFlags_NoScrollWithMouse) && !(window->Flags & ImGuiWindowFlags_NoMouseInputs))))
             window = window->ParentWindow;
         if (!(window->Flags & ImGuiWindowFlags_NoScrollWithMouse) && !(window->Flags & ImGuiWindowFlags_NoMouseInputs))
         {
+            LockWheelingWindow(mouse_window);
             float max_step = window->InnerRect.GetHeight() * 0.67f;
             float scroll_step = ImFloor(ImMin(5 * window->CalcFontSize(), max_step));
-            SetScrollY(window, window->Scroll.y - wheel_y * scroll_step);
+            SetScrollY(window, window->Scroll.y - wheel.y * scroll_step);
         }
     }
 
     // Horizontal Mouse Wheel scrolling, or Vertical Mouse Wheel w/ Shift held
-    if (wheel_x != 0.0f)
+    if (wheel.x != 0.0f)
     {
-        StartLockWheelingWindow(window);
+        ImGuiWindow* window = mouse_window;
         while ((window->Flags & ImGuiWindowFlags_ChildWindow) && ((window->ScrollMax.x == 0.0f) || ((window->Flags & ImGuiWindowFlags_NoScrollWithMouse) && !(window->Flags & ImGuiWindowFlags_NoMouseInputs))))
             window = window->ParentWindow;
         if (!(window->Flags & ImGuiWindowFlags_NoScrollWithMouse) && !(window->Flags & ImGuiWindowFlags_NoMouseInputs))
         {
+            LockWheelingWindow(mouse_window);
             float max_step = window->InnerRect.GetWidth() * 0.67f;
             float scroll_step = ImFloor(ImMin(2 * window->CalcFontSize(), max_step));
-            SetScrollX(window, window->Scroll.x - wheel_x * scroll_step);
+            SetScrollX(window, window->Scroll.x - wheel.x * scroll_step);
         }
     }
 }
@@ -4541,18 +4615,6 @@ void ImGui::UpdateHoveredWindowAndCaptureFlags()
 
     // Update io.WantTextInput flag, this is to allow systems without a keyboard (e.g. mobile, hand-held) to show a software keyboard if possible
     io.WantTextInput = (g.WantTextInputNextFrame != -1) ? (g.WantTextInputNextFrame != 0) : false;
-}
-
-// [Internal] Do not use directly (can read io.KeyMods instead)
-ImGuiModFlags ImGui::GetMergedModFlags()
-{
-    ImGuiContext& g = *GImGui;
-    ImGuiModFlags key_mods = ImGuiModFlags_None;
-    if (g.IO.KeyCtrl)   { key_mods |= ImGuiModFlags_Ctrl; }
-    if (g.IO.KeyShift)  { key_mods |= ImGuiModFlags_Shift; }
-    if (g.IO.KeyAlt)    { key_mods |= ImGuiModFlags_Alt; }
-    if (g.IO.KeySuper)  { key_mods |= ImGuiModFlags_Super; }
-    return key_mods;
 }
 
 void ImGui::NewFrame()
@@ -4764,9 +4826,10 @@ void ImGui::NewFrame()
     {
         ImGuiWindow* window = g.Windows[i];
         window->WasActive = window->Active;
-        window->BeginCount = 0;
         window->Active = false;
         window->WriteAccessed = false;
+        window->BeginCountPreviousFrame = window->BeginCount;
+        window->BeginCount = 0;
 
         // Garbage collect transient buffers of recently unused windows
         if (!window->WasActive && !window->MemoryCompacted && window->LastTimeActive < memory_compact_start_time)
@@ -4864,6 +4927,7 @@ void ImGui::Shutdown()
         IM_DELETE(g.IO.Fonts);
     }
     g.IO.Fonts = NULL;
+    g.DrawListSharedData.TempBuffer.clear();
 
     // Cleanup of other data are conditional on actually having initialized Dear ImGui.
     if (!g.Initialized)
@@ -5583,17 +5647,16 @@ void ImGui::SetItemUsingMouseWheel()
     }
 }
 
-// FIXME: Technically this also prevents use of Gamepad D-Pad, may not be an issue.
 void ImGui::SetActiveIdUsingAllKeyboardKeys()
 {
     ImGuiContext& g = *GImGui;
     IM_ASSERT(g.ActiveId != 0);
-    g.ActiveIdUsingNavDirMask = ~(ImU32)0;
+    g.ActiveIdUsingNavDirMask = (1 << ImGuiDir_COUNT) - 1;
     g.ActiveIdUsingKeyInputMask.SetBitRange(ImGuiKey_Keyboard_BEGIN, ImGuiKey_Keyboard_END);
-    g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModCtrl);
-    g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModShift);
-    g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModAlt);
-    g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModSuper);
+    //g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModCtrl);
+    //g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModShift);
+    //g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModAlt);
+    //g.ActiveIdUsingKeyInputMask.SetBit(ImGuiKey_ModSuper);
     NavMoveRequestCancel();
 }
 
@@ -8333,6 +8396,11 @@ bool ImGui::IsMouseHoveringRect(const ImVec2& r_min, const ImVec2& r_max, bool c
 ImGuiKeyData* ImGui::GetKeyData(ImGuiKey key)
 {
     ImGuiContext& g = *GImGui;
+
+    // Special storage location for mods
+    if (key & ImGuiMod_Mask_)
+        key = ConvertSingleModFlagToKey(key);
+
     int index;
 #ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
     IM_ASSERT(key >= ImGuiKey_LegacyNativeKey_BEGIN && key < ImGuiKey_NamedKey_END);
@@ -8348,12 +8416,12 @@ ImGuiKeyData* ImGui::GetKeyData(ImGuiKey key)
 }
 
 #ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
-int ImGui::GetKeyIndex(ImGuiKey key)
+ImGuiKey ImGui::GetKeyIndex(ImGuiKey key)
 {
     ImGuiContext& g = *GImGui;
     IM_ASSERT(IsNamedKey(key));
     const ImGuiKeyData* key_data = GetKeyData(key);
-    return (int)(key_data - g.IO.KeysData);
+    return (ImGuiKey)(key_data - g.IO.KeysData);
 }
 #endif
 
@@ -8377,8 +8445,8 @@ static const char* const GKeyNames[] =
     "GamepadL1", "GamepadR1", "GamepadL2", "GamepadR2", "GamepadL3", "GamepadR3",
     "GamepadLStickLeft", "GamepadLStickRight", "GamepadLStickUp", "GamepadLStickDown",
     "GamepadRStickLeft", "GamepadRStickRight", "GamepadRStickUp", "GamepadRStickDown",
-    "ModCtrl", "ModShift", "ModAlt", "ModSuper",
     "MouseLeft", "MouseRight", "MouseMiddle", "MouseX1", "MouseX2", "MouseWheelX", "MouseWheelY",
+    "ModCtrl", "ModShift", "ModAlt", "ModSuper", // ReservedForModXXX are showing the ModXXX names.
 };
 IM_STATIC_ASSERT(ImGuiKey_NamedKey_COUNT == IM_ARRAYSIZE(GKeyNames));
 
@@ -8398,22 +8466,23 @@ const char* ImGui::GetKeyName(ImGuiKey key)
 #endif
     if (key == ImGuiKey_None)
         return "None";
+    if (key & ImGuiMod_Mask_)
+        key = ConvertSingleModFlagToKey(key);
     if (!IsNamedKey(key))
         return "Unknown";
 
     return GKeyNames[key - ImGuiKey_NamedKey_BEGIN];
 }
 
-void ImGui::GetKeyChordName(ImGuiModFlags mods, ImGuiKey key, char* out_buf, int out_buf_size)
+void ImGui::GetKeyChordName(ImGuiKeyChord key_chord, char* out_buf, int out_buf_size)
 {
     ImGuiContext& g = *GImGui;
-    IM_ASSERT((mods & ~ImGuiModFlags_All) == 0 && "Passing invalid ImGuiModFlags value!"); // A frequent mistake is to pass ImGuiKey_ModXXX instead of ImGuiModFlags_XXX
     ImFormatString(out_buf, (size_t)out_buf_size, "%s%s%s%s%s",
-        (mods & ImGuiModFlags_Ctrl) ? "Ctrl+" : "",
-        (mods & ImGuiModFlags_Shift) ? "Shift+" : "",
-        (mods & ImGuiModFlags_Alt) ? "Alt+" : "",
-        (mods & ImGuiModFlags_Super) ? (g.IO.ConfigMacOSXBehaviors ? "Cmd+" : "Super+") : "",
-        GetKeyName(key));
+        (key_chord & ImGuiMod_Ctrl) ? "Ctrl+" : "",
+        (key_chord & ImGuiMod_Shift) ? "Shift+" : "",
+        (key_chord & ImGuiMod_Alt) ? "Alt+" : "",
+        (key_chord & ImGuiMod_Super) ? (g.IO.ConfigMacOSXBehaviors ? "Cmd+" : "Super+") : "",
+        GetKeyName((ImGuiKey)(key_chord & ~ImGuiMod_Mask_)));
 }
 
 // t0 = previous time (e.g.: g.Time - g.IO.DeltaTime)
@@ -8668,9 +8737,10 @@ static const char* GetInputSourceName(ImGuiInputSource source)
 static void DebugPrintInputEvent(const char* prefix, const ImGuiInputEvent* e)
 {
     ImGuiContext& g = *GImGui;
-    if (e->Type == ImGuiInputEventType_MousePos)    { IMGUI_DEBUG_LOG_IO("%s: MousePos (%.1f, %.1f)\n", prefix, e->MousePos.PosX, e->MousePos.PosY); return; }
+    if (e->Type == ImGuiInputEventType_MousePos)    { if (e->MousePos.PosX == -FLT_MAX && e->MousePos.PosY == -FLT_MAX) IMGUI_DEBUG_LOG_IO("%s: MousePos (-FLT_MAX, -FLT_MAX)\n", prefix); else IMGUI_DEBUG_LOG_IO("%s: MousePos (%.1f, %.1f)\n", prefix, e->MousePos.PosX, e->MousePos.PosY); return; }
     if (e->Type == ImGuiInputEventType_MouseButton) { IMGUI_DEBUG_LOG_IO("%s: MouseButton %d %s\n", prefix, e->MouseButton.Button, e->MouseButton.Down ? "Down" : "Up"); return; }
     if (e->Type == ImGuiInputEventType_MouseWheel)  { IMGUI_DEBUG_LOG_IO("%s: MouseWheel (%.1f, %.1f)\n", prefix, e->MouseWheel.WheelX, e->MouseWheel.WheelY); return; }
+    if (e->Type == ImGuiInputEventType_MouseViewport){IMGUI_DEBUG_LOG_IO("%s: MouseViewport (0x%08X)\n", prefix, e->MouseViewport.HoveredViewportID); return; }
     if (e->Type == ImGuiInputEventType_Key)         { IMGUI_DEBUG_LOG_IO("%s: Key \"%s\" %s\n", prefix, ImGui::GetKeyName(e->Key.Key), e->Key.Down ? "Down" : "Up"); return; }
     if (e->Type == ImGuiInputEventType_Text)        { IMGUI_DEBUG_LOG_IO("%s: Text: %c (U+%08X)\n", prefix, e->Text.Char, e->Text.Char); return; }
     if (e->Type == ImGuiInputEventType_Focus)       { IMGUI_DEBUG_LOG_IO("%s: AppFocused %d\n", prefix, e->AppFocused.Focused); return; }
@@ -8701,45 +8771,31 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
         ImGuiInputEvent* e = &g.InputEventsQueue[event_n];
         if (e->Type == ImGuiInputEventType_MousePos)
         {
+            // Trickling Rule: Stop processing queued events if we already handled a mouse button change
             ImVec2 event_pos(e->MousePos.PosX, e->MousePos.PosY);
-            if (IsMousePosValid(&event_pos))
-                event_pos = ImVec2(ImFloorSigned(event_pos.x), ImFloorSigned(event_pos.y)); // Apply same flooring as UpdateMouseInputs()
-            e->IgnoredAsSame = (io.MousePos.x == event_pos.x && io.MousePos.y == event_pos.y);
-            if (!e->IgnoredAsSame)
-            {
-                // Trickling Rule: Stop processing queued events if we already handled a mouse button change
-                if (trickle_fast_inputs && (mouse_button_changed != 0 || mouse_wheeled || key_changed || text_inputted))
-                    break;
-                io.MousePos = event_pos;
-                mouse_moved = true;
-            }
+            if (trickle_fast_inputs && (mouse_button_changed != 0 || mouse_wheeled || key_changed || text_inputted))
+                break;
+            io.MousePos = event_pos;
+            mouse_moved = true;
         }
         else if (e->Type == ImGuiInputEventType_MouseButton)
         {
+            // Trickling Rule: Stop processing queued events if we got multiple action on the same button
             const ImGuiMouseButton button = e->MouseButton.Button;
             IM_ASSERT(button >= 0 && button < ImGuiMouseButton_COUNT);
-            e->IgnoredAsSame = (io.MouseDown[button] == e->MouseButton.Down);
-            if (!e->IgnoredAsSame)
-            {
-                // Trickling Rule: Stop processing queued events if we got multiple action on the same button
-                if (trickle_fast_inputs && ((mouse_button_changed & (1 << button)) || mouse_wheeled))
-                    break;
-                io.MouseDown[button] = e->MouseButton.Down;
-                mouse_button_changed |= (1 << button);
-            }
+            if (trickle_fast_inputs && ((mouse_button_changed & (1 << button)) || mouse_wheeled))
+                break;
+            io.MouseDown[button] = e->MouseButton.Down;
+            mouse_button_changed |= (1 << button);
         }
         else if (e->Type == ImGuiInputEventType_MouseWheel)
         {
-            e->IgnoredAsSame = (e->MouseWheel.WheelX == 0.0f && e->MouseWheel.WheelY == 0.0f);
-            if (!e->IgnoredAsSame)
-            {
-                // Trickling Rule: Stop processing queued events if we got multiple action on the event
-                if (trickle_fast_inputs && (mouse_moved || mouse_button_changed != 0))
-                    break;
-                io.MouseWheelH += e->MouseWheel.WheelX;
-                io.MouseWheel += e->MouseWheel.WheelY;
-                mouse_wheeled = true;
-            }
+            // Trickling Rule: Stop processing queued events if we got multiple action on the event
+            if (trickle_fast_inputs && (mouse_moved || mouse_button_changed != 0))
+                break;
+            io.MouseWheelH += e->MouseWheel.WheelX;
+            io.MouseWheel += e->MouseWheel.WheelY;
+            mouse_wheeled = true;
         }
         else if (e->Type == ImGuiInputEventType_MouseViewport)
         {
@@ -8747,37 +8803,33 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
         }
         else if (e->Type == ImGuiInputEventType_Key)
         {
+            // Trickling Rule: Stop processing queued events if we got multiple action on the same button
             ImGuiKey key = e->Key.Key;
             IM_ASSERT(key != ImGuiKey_None);
-            const int keydata_index = (key - ImGuiKey_KeysData_OFFSET);
-            ImGuiKeyData* keydata = &io.KeysData[keydata_index];
-            e->IgnoredAsSame = (keydata->Down == e->Key.Down && keydata->AnalogValue == e->Key.AnalogValue);
-            if (!e->IgnoredAsSame)
+            ImGuiKeyData* key_data = GetKeyData(key);
+            const int key_data_index = (int)(key_data - g.IO.KeysData);
+            if (trickle_fast_inputs && key_data->Down != e->Key.Down && (key_changed_mask.TestBit(key_data_index) || text_inputted || mouse_button_changed != 0))
+                break;
+            key_data->Down = e->Key.Down;
+            key_data->AnalogValue = e->Key.AnalogValue;
+            key_changed = true;
+            key_changed_mask.SetBit(key_data_index);
+
+            if (key == ImGuiMod_Ctrl || key == ImGuiMod_Shift || key == ImGuiMod_Alt || key == ImGuiMod_Super)
             {
-                // Trickling Rule: Stop processing queued events if we got multiple action on the same button
-                if (trickle_fast_inputs && keydata->Down != e->Key.Down && (key_changed_mask.TestBit(keydata_index) || text_inputted || mouse_button_changed != 0))
-                    break;
-                keydata->Down = e->Key.Down;
-                keydata->AnalogValue = e->Key.AnalogValue;
-                key_changed = true;
-                key_changed_mask.SetBit(keydata_index);
-
-                if (key == ImGuiKey_ModCtrl || key == ImGuiKey_ModShift || key == ImGuiKey_ModAlt || key == ImGuiKey_ModSuper)
-                {
-                    if (key == ImGuiKey_ModCtrl) { io.KeyCtrl = keydata->Down; }
-                    if (key == ImGuiKey_ModShift) { io.KeyShift = keydata->Down; }
-                    if (key == ImGuiKey_ModAlt) { io.KeyAlt = keydata->Down; }
-                    if (key == ImGuiKey_ModSuper) { io.KeySuper = keydata->Down; }
-                    io.KeyMods = GetMergedModFlags();
-                }
-
-                // Allow legacy code using io.KeysDown[GetKeyIndex()] with new backends
-#ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
-                io.KeysDown[key] = keydata->Down;
-                if (io.KeyMap[key] != -1)
-                    io.KeysDown[io.KeyMap[key]] = keydata->Down;
-#endif
+                if (key == ImGuiMod_Ctrl) { io.KeyCtrl = key_data->Down; }
+                if (key == ImGuiMod_Shift) { io.KeyShift = key_data->Down; }
+                if (key == ImGuiMod_Alt) { io.KeyAlt = key_data->Down; }
+                if (key == ImGuiMod_Super) { io.KeySuper = key_data->Down; }
+                io.KeyMods = GetMergedModsFromBools();
             }
+
+            // Allow legacy code using io.KeysDown[GetKeyIndex()] with new backends
+#ifndef IMGUI_DISABLE_OBSOLETE_KEYIO
+            io.KeysDown[key_data_index] = key_data->Down;
+            if (io.KeyMap[key_data_index] != -1)
+                io.KeysDown[io.KeyMap[key_data_index]] = key_data->Down;
+#endif
         }
         else if (e->Type == ImGuiInputEventType_Text)
         {
@@ -8791,12 +8843,10 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
         }
         else if (e->Type == ImGuiInputEventType_Focus)
         {
-            // We intentionally overwrite this and process lower, in order to give a chance
+            // We intentionally overwrite this and process in NewFrame(), in order to give a chance
             // to multi-viewports backends to queue AddFocusEvent(false) + AddFocusEvent(true) in same frame.
             const bool focus_lost = !e->AppFocused.Focused;
-            e->IgnoredAsSame = (io.AppFocusLost == focus_lost);
-            if (!e->IgnoredAsSame)
-                io.AppFocusLost = focus_lost;
+            io.AppFocusLost = focus_lost;
         }
         else
         {
@@ -8813,7 +8863,7 @@ void ImGui::UpdateInputEvents(bool trickle_fast_inputs)
 #ifndef IMGUI_DISABLE_DEBUG_TOOLS
     if (event_n != 0 && (g.DebugLogFlags & ImGuiDebugLogFlags_EventIO))
         for (int n = 0; n < g.InputEventsQueue.Size; n++)
-            DebugPrintInputEvent(n < event_n ? (g.InputEventsQueue[n].IgnoredAsSame ? "Processed (Same)" : "Processed") : "Remaining", &g.InputEventsQueue[n]);
+            DebugPrintInputEvent(n < event_n ? "Processed" : "Remaining", &g.InputEventsQueue[n]);
 #endif
 
     // Remaining events will be processed on the next frame
@@ -8976,7 +9026,7 @@ static void ImGui::ErrorCheckEndFrameSanityChecks()
     // send key release events mid-frame. This would normally trigger this assertion and lead to sheared inputs.
     // We silently accommodate for this case by ignoring/ the case where all io.KeyXXX modifiers were released (aka key_mod_flags == 0),
     // while still correctly asserting on mid-frame key press events.
-    const ImGuiModFlags key_mods = GetMergedModFlags();
+    const ImGuiKeyChord key_mods = GetMergedModsFromBools();
     IM_ASSERT((key_mods == 0 || g.IO.KeyMods == key_mods) && "Mismatching io.KeyCtrl/io.KeyShift/io.KeyAlt/io.KeySuper vs io.KeyMods");
     IM_UNUSED(key_mods);
 
@@ -11500,7 +11550,7 @@ static void ImGui::NavUpdateCancelRequest()
         SetNavID(child_window->ChildId, ImGuiNavLayer_Main, 0, WindowRectAbsToRel(parent_window, child_rect));
         NavRestoreHighlightAfterMove();
     }
-    else if (g.OpenPopupStack.Size > 0 && !(g.OpenPopupStack.back().Window->Flags & ImGuiWindowFlags_Modal))
+    else if (g.OpenPopupStack.Size > 0 && g.OpenPopupStack.back().Window != NULL && !(g.OpenPopupStack.back().Window->Flags & ImGuiWindowFlags_Modal))
     {
         // Close open popup/menu
         ClosePopupToLevel(g.OpenPopupStack.Size - 1, true);
@@ -11781,7 +11831,7 @@ static void ImGui::NavUpdateWindowing()
     // Keyboard: Press and Release ALT to toggle menu layer
     // - Testing that only Alt is tested prevents Alt+Shift or AltGR from toggling menu layer.
     // - AltGR is normally Alt+Ctrl but we can't reliably detect it (not all backends/systems/layout emit it as Alt+Ctrl). But even on keyboards without AltGR we don't want Alt+Ctrl to open menu anyway.
-    if (nav_keyboard_active && IsKeyPressed(ImGuiKey_ModAlt))
+    if (nav_keyboard_active && IsKeyPressed(ImGuiMod_Alt))
     {
         g.NavWindowingToggleLayer = true;
         g.NavInputSource = ImGuiInputSource_Keyboard;
@@ -11795,11 +11845,11 @@ static void ImGui::NavUpdateWindowing()
 
         // Apply layer toggle on release
         // Important: as before version <18314 we lacked an explicit IO event for focus gain/loss, we also compare mouse validity to detect old backends clearing mouse pos on focus loss.
-        if (IsKeyReleased(ImGuiKey_ModAlt) && g.NavWindowingToggleLayer)
+        if (IsKeyReleased(ImGuiMod_Alt) && g.NavWindowingToggleLayer)
             if (g.ActiveId == 0 || g.ActiveIdAllowOverlap)
                 if (IsMousePosValid(&io.MousePos) == IsMousePosValid(&io.MousePosPrev))
                     apply_toggle_layer = true;
-        if (!IsKeyDown(ImGuiKey_ModAlt))
+        if (!IsKeyDown(ImGuiMod_Alt))
             g.NavWindowingToggleLayer = false;
     }
 
@@ -15503,7 +15553,7 @@ void ImGui::DockNodeEndAmendTabBar()
     End();
 }
 
-static bool IsDockNodeTitleBarHighlighted(ImGuiDockNode* node, ImGuiDockNode* root_node, ImGuiWindow* host_window)
+static bool IsDockNodeTitleBarHighlighted(ImGuiDockNode* node, ImGuiDockNode* root_node)
 {
     // CTRL+Tab highlight (only highlighting leaf node, not whole hierarchy)
     ImGuiContext& g = *GImGui;
@@ -15511,10 +15561,17 @@ static bool IsDockNodeTitleBarHighlighted(ImGuiDockNode* node, ImGuiDockNode* ro
         return (g.NavWindowingTarget->DockNode == node);
 
     // FIXME-DOCKING: May want alternative to treat central node void differently? e.g. if (g.NavWindow == host_window)
-    if (g.NavWindow && g.NavWindow->RootWindowForTitleBarHighlight == host_window->RootWindowDockTree && root_node->LastFocusedNodeId == node->ID)
-        for (ImGuiDockNode* parent_node = g.NavWindow->RootWindow->DockNode; parent_node != NULL; parent_node = parent_node->HostWindow ? parent_node->HostWindow->RootWindow->DockNode : NULL)
+    if (g.NavWindow && root_node->LastFocusedNodeId == node->ID)
+    {
+        // FIXME: This could all be backed in RootWindowForTitleBarHighlight? Probably need to reorganize for both dock nodes + other RootWindowForTitleBarHighlight users (not-node)
+        ImGuiWindow* parent_window = g.NavWindow->RootWindow;
+        while (parent_window->Flags & ImGuiWindowFlags_ChildMenu)
+            parent_window = parent_window->ParentWindow->RootWindow;
+        ImGuiDockNode* start_parent_node = parent_window->DockNodeAsHost ? parent_window->DockNodeAsHost : parent_window->DockNode;
+        for (ImGuiDockNode* parent_node = start_parent_node; parent_node != NULL; parent_node = parent_node->HostWindow ? parent_node->HostWindow->RootWindow->DockNode : NULL)
             if ((parent_node = ImGui::DockNodeGetRootNode(parent_node)) == root_node)
                 return true;
+    }
     return false;
 }
 
@@ -15533,7 +15590,7 @@ static void ImGui::DockNodeUpdateTabBar(ImGuiDockNode* node, ImGuiWindow* host_w
     // Decide if we should use a focused title bar color
     bool is_focused = false;
     ImGuiDockNode* root_node = DockNodeGetRootNode(node);
-    if (IsDockNodeTitleBarHighlighted(node, root_node, host_window))
+    if (IsDockNodeTitleBarHighlighted(node, root_node))
         is_focused = true;
 
     // Hidden tab bar will show a triangle on the upper-left (in Begin)
@@ -16105,11 +16162,11 @@ static void ImGui::DockNodePreviewDockRender(ImGuiWindow* host_window, ImGuiDock
             if (!host_node->IsHiddenTabBar() && !host_node->IsNoTabBar())
                 tab_pos.x += host_node->TabBar->WidthAllTabs + g.Style.ItemInnerSpacing.x; // We don't use OffsetNewTab because when using non-persistent-order tab bar it is incremented with each Tab submission.
             else
-                tab_pos.x += g.Style.ItemInnerSpacing.x + TabItemCalcSize(host_node->Windows[0]->Name, host_node->Windows[0]->HasCloseButton).x;
+                tab_pos.x += g.Style.ItemInnerSpacing.x + TabItemCalcSize(host_node->Windows[0]).x;
         }
         else if (!(host_window->Flags & ImGuiWindowFlags_DockNodeHost))
         {
-            tab_pos.x += g.Style.ItemInnerSpacing.x + TabItemCalcSize(host_window->Name, host_window->HasCloseButton).x; // Account for slight offset which will be added when changing from title bar to tab bar
+            tab_pos.x += g.Style.ItemInnerSpacing.x + TabItemCalcSize(host_window).x; // Account for slight offset which will be added when changing from title bar to tab bar
         }
 
         // Draw tab shape/label preview (payload may be a loose window or a host window carrying multiple tabbed windows)
@@ -16127,7 +16184,7 @@ static void ImGui::DockNodePreviewDockRender(ImGuiWindow* host_window, ImGuiDock
                 continue;
 
             // Calculate the tab bounding box for each payload window
-            ImVec2 tab_size = TabItemCalcSize(payload_window->Name, payload_window->HasCloseButton);
+            ImVec2 tab_size = TabItemCalcSize(payload_window);
             ImRect tab_bb(tab_pos.x, tab_pos.y, tab_pos.x + tab_size.x, tab_pos.y + tab_size.y);
             tab_pos.x += tab_size.x + g.Style.ItemInnerSpacing.x;
             const ImU32 overlay_col_text = GetColorU32(payload_window->DockStyle.Colors[ImGuiWindowDockStyleCol_Text]);
@@ -19096,7 +19153,7 @@ void ImGui::UpdateDebugToolItemPicker()
     SetMouseCursor(ImGuiMouseCursor_Hand);
     if (IsKeyPressed(ImGuiKey_Escape))
         g.DebugItemPickerActive = false;
-    const bool change_mapping = g.IO.KeyMods == (ImGuiModFlags_Ctrl | ImGuiModFlags_Shift);
+    const bool change_mapping = g.IO.KeyMods == (ImGuiMod_Ctrl | ImGuiMod_Shift);
     if (!change_mapping && IsMouseClicked(g.DebugItemPickerMouseButton) && hovered_id)
     {
         g.DebugItemPickerBreakId = hovered_id;
@@ -19251,7 +19308,7 @@ void ImGui::ShowStackToolWindow(bool* p_open)
     Checkbox("Ctrl+C: copy path to clipboard", &tool->CopyToClipboardOnCtrlC);
     SameLine();
     TextColored((time_since_copy >= 0.0f && time_since_copy < 0.75f && ImFmod(time_since_copy, 0.25f) < 0.25f * 0.5f) ? ImVec4(1.f, 1.f, 0.3f, 1.f) : ImVec4(), "*COPIED*");
-    if (tool->CopyToClipboardOnCtrlC && IsKeyDown(ImGuiKey_ModCtrl) && IsKeyPressed(ImGuiKey_C))
+    if (tool->CopyToClipboardOnCtrlC && IsKeyDown(ImGuiMod_Ctrl) && IsKeyPressed(ImGuiKey_C))
     {
         tool->CopyToClipboardLastTime = (float)g.Time;
         char* p = g.TempBuffer.Data;

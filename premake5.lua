@@ -2,11 +2,11 @@ project "ImGui"
 	kind "StaticLib"
 	systemversion "latest"
 	language "C++"
-	cppdialect "C++17"
+	cppdialect "C++20"
 	staticruntime "On"
 
-	targetdir (bin .. "/%{prj.name}")
-	objdir (obj .. "/%{prj.name}")
+	targetdir (BIN .. "/%{prj.name}")
+	objdir (OBJ .. "/%{prj.name}")
 
 	files
 	{

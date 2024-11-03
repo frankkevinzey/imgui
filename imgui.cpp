@@ -1,4 +1,4 @@
-// dear imgui, v1.91.4
+// dear imgui, v1.91.5 WIP
 // (main code and documentation)
 
 // Help:
@@ -4853,6 +4853,13 @@ ImGuiIO& ImGui::GetIO()
 {
     IM_ASSERT(GImGui != NULL && "No current context. Did you call ImGui::CreateContext() and ImGui::SetCurrentContext() ?");
     return GImGui->IO;
+}
+
+// This variant exists to facilitate backends experimenting with multi-threaded parallel context. (#8069, #6293, #5856)
+ImGuiIO& ImGui::GetIOEx(ImGuiContext* ctx)
+{
+    IM_ASSERT(ctx != NULL);
+    return ctx->IO;
 }
 
 ImGuiPlatformIO& ImGui::GetPlatformIO()
@@ -22212,7 +22219,7 @@ void ImGui::DebugNodeWindow(ImGuiWindow* window, const char* label)
     for (int layer = 0; layer < ImGuiNavLayer_COUNT; layer++)
     {
         ImRect r = window->NavRectRel[layer];
-        if (r.Min.x >= r.Max.y && r.Min.y >= r.Max.y)
+        if (r.Min.x >= r.Max.x && r.Min.y >= r.Max.y)
             BulletText("NavLastIds[%d]: 0x%08X", layer, window->NavLastIds[layer]);
         else
             BulletText("NavLastIds[%d]: 0x%08X at +(%.1f,%.1f)(%.1f,%.1f)", layer, window->NavLastIds[layer], r.Min.x, r.Min.y, r.Max.x, r.Max.y);
